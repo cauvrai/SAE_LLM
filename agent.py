@@ -1,43 +1,51 @@
 import os
-import asyncio
 import json
+import asyncio
+import streamlit as st
 from dotenv import load_dotenv
 from upstash_vector import Index
-from agents import Agent, Runner, FunctionTool
-
-import logging
-
-# On force le silence sur les modules réseau et OpenAI
-os.environ["OPENAI_LOG"] = "error"
-logging.getLogger("openai").setLevel(logging.ERROR)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+from agents import Agent, Runner, FunctionTool, ModelSettings
 
 load_dotenv()
-index = Index(url=os.getenv("UPSTASH_VECTOR_REST_URL"), token=os.getenv("UPSTASH_VECTOR_REST_TOKEN"))
+
+# Connexion à Upstash
+index = Index(
+    url=os.getenv("UPSTASH_VECTOR_REST_URL"), 
+    token=os.getenv("UPSTASH_VECTOR_REST_TOKEN")
+)
 
 async def search_portfolio(context, query) -> str:
-    # Nettoyage de la requête (cas du JSON envoyé par l'IA)
-    search_text = query
-    if isinstance(query, dict):
-        search_text = query.get("query", str(query))
-    elif isinstance(query, str) and "{" in query:
-        try:
-            search_text = json.loads(query).get("query", query)
-        except: pass
+    try:
+        # Nettoyage de la requête envoyée par Groq
+        search_text = query
+        if isinstance(query, dict):
+            search_text = query.get("query", str(query))
+        elif isinstance(query, str) and "{" in query:
+            try:
+                search_text = json.loads(query).get("query", query)
+            except: pass
 
-    print(f"\n🔍 [DEBUG] Recherche Upstash : '{search_text}'")
-    results = index.query(data=search_text, top_k=3, include_data=True)
-    
-    if not results or not results[0].data:
-        print("❌ Rien trouvé dans Upstash")
-        return "ERREUR : Aucun document trouvé dans la base de données."
+        # Sécurité supplémentaire : on force le texte en chaîne de caractères
+        search_text = str(search_text)
 
-    data_recue = results[0].data
-    print(f"📥 Contenu reçu : {data_recue[:100]}...")
-    
-    # Message ultra-explicite pour forcer l'IA à utiliser le texte
-    return f"IMPORTANT - VOICI LES DONNÉES EXTRAITES : {data_recue}"
+        print(f"\n🔍 [DEBUG] Recherche Upstash : '{search_text}'")
+        
+        # Appel à la base de données
+        results = index.query(data=search_text, top_k=3, include_data=True)
+        
+        if not results or not results[0].data:
+            return "ERREUR : Aucun document trouvé dans la base de données."
 
+        data_recue = results[0].data
+        return f"IMPORTANT - VOICI LES DONNÉES EXTRAITES : {data_recue}"
+
+    except Exception as e:
+        # C'EST ICI LA MAGIE : au lieu de crasher, on capture l'erreur !
+        error_msg = f"Erreur de connexion à Upstash : {str(e)}"
+        print(f"❌ {error_msg}")
+        return error_msg
+
+# --- Configuration de l'Outil ---
 search_portfolio_schema = {
     "type": "object",
     "properties": {"query": {"type": "string", "description": "Mots-clés"}},
@@ -51,8 +59,7 @@ portfolio_search_tool = FunctionTool(
     on_invoke_tool=search_portfolio
 )
 
-
-
+# --- Configuration de l'Agent ---
 agent = Agent(
     name="Charles Auvrai",  
     model="llama-3.1-8b-instant", 
@@ -66,14 +73,6 @@ agent = Agent(
         "3. SPORT : Je mentionne le sport de haut niveau UNIQUEMENT si on aborde mes loisirs, mes passions ou mes qualités morales (rigueur, esprit d'équipe). "
         "4. FORMAT : Mes réponses sont concises (pas plus de 5 phrases, sauf si on me demande des détails). Je fais des paragraphes et je saute des lignes pour que ma réponse soit très lisible."
     ),
-    tools=[portfolio_search_tool]
-    )
-
-async def main():
-    print("--- Test de l'Agent ---")
-    result = await Runner.run(agent, "Quelles sont mes compétences techniques ?")
-    print(f"\n--- Réponse finale ---\n{result.final_output}")
-
-if __name__ == "__main__":
-
-    asyncio.run(main())
+    tools=[portfolio_search_tool],
+    model_settings=ModelSettings(temperature=0.1)
+)
